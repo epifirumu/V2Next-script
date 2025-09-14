@@ -1,0 +1,142 @@
+name: Build and Release UserScript
+
+on:
+  workflow_dispatch:  # 允许手动触发
+    inputs:
+      release_tag:
+        description: 'Release tag (e.g., v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+      target_branch:
+        description: 'Target branch to build from'
+        required: false
+        default: 'master'
+        type: choice
+        options:
+          - master
+          - patch_20250914_0
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.target_branch || github.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: '9.1.4'
+          run_install: false
+
+      - name: Get pnpm store directory
+        shell: bash
+        run: |
+          echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+      - name: Setup pnpm cache
+        uses: actions/cache@v3
+        with:
+          path: ~/.pnpm-store
+          key: ${{ runner.os }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-store-
+
+      - name: Install dependencies
+        run: |
+          sed -i 's|https://r2\.cnpmjs\.org/|https://registry.npmjs.org/|g' pnpm-lock.yaml
+          pnpm install --frozen-lockfile
+
+      - name: Build PC UserScript
+        run: |
+          cd packages/pc
+          pnpm --filter pc run build-pc
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          
+          # 复制PC版本UserScript
+          if [ -f packages/pc/dist/V2Next.user.js ]; then
+            cp packages/pc/dist/V2Next.user.js release-assets/
+            echo "PC UserScript built successfully"
+          else
+            echo "PC UserScript build failed - file not found"
+            exit 1
+          fi
+          
+          # 列出构建产物
+          echo "Release assets:"
+          ls -la release-assets/
+
+      - name: Get release tag
+        id: get_tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.release_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.get_tag.outputs.tag }}
+          release_name: V2Next ${{ steps.get_tag.outputs.tag }}
+          body: |
+            ## V2Next UserScript Release ${{ steps.get_tag.outputs.tag }}
+          draft: false
+          prerelease: false
+
+      - name: Upload PC UserScript
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./release-assets/V2Next.user.js
+          asset_name: V2Next.user.js
+          asset_content_type: application/javascript
+
+      - name: Create checksums
+        run: |
+          cd release-assets
+          sha256sum *.user.js > checksums.txt
+          echo "Checksums created:"
+          cat checksums.txt
+
+      - name: Upload checksums
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./release-assets/checksums.txt
+          asset_name: checksums.txt
+          asset_content_type: text/plain
+
+      - name: Post-build summary
+        run: |
+          echo "## 🎉 构建成功!" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 发布的文件:" >> $GITHUB_STEP_SUMMARY
+          echo "- V2Next.user.js (PC版)" >> $GITHUB_STEP_SUMMARY
+          echo "- checksums.txt (校验和)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📝 文件信息:" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          ls -la release-assets/ >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔗 Release链接:" >> $GITHUB_STEP_SUMMARY
+          echo "[${{ steps.get_tag.outputs.tag }}](${{ steps.create_release.outputs.html_url }})" >> $GITHUB_STEP_SUMMARY
